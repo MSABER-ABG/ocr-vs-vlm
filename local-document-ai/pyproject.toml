@@ -1,0 +1,19 @@
+[project]
+name = "local-document-ai"
+version = "0.1.0"
+description = "Fully local, modular Document AI pipeline (no VLM, no cloud)"
+requires-python = ">=3.9"
+dependencies = [
+    "paddlepaddle==2.6.2",
+    "paddleocr==2.7.3",
+    "numpy<2",
+    "opencv-python-headless",
+    "Pillow",
+    "pypdfium2",
+]
+
+[project.scripts]
+local-document-ai = "app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

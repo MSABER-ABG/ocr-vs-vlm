@@ -1,0 +1,10 @@
+# real documents and outputs must never be committed
+input/
+output/
+# downloaded model weights (re-downloaded automatically on first use)
+models/
+.venv*/
+.v5_worker.log
+__pycache__/
+*.pyc
+scratch_*.py

@@ -1,5 +1,17 @@
 streamlit==1.35.0
 openai==1.35.0
+httpx==0.28.1
 pytesseract==0.3.10
+easyocr==1.7.1
+paddlepaddle==2.6.2
+paddleocr==2.7.3
 pdf2image==1.17.0
 Pillow==10.3.0
+# --- ABG OCR engine (local-document-ai) ---
+onnxruntime==1.19.2     # 1.19 keeps protobuf<=3.20, which paddlepaddle 2.6 needs
+numpy<2
+opencv-python-headless
+pypdfium2
+PyYAML
+pyclipper
+shapely

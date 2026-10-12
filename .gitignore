@@ -12,3 +12,6 @@ OCR Software/
 
 # Presentation files — not part of the app
 *.pptx
+
+# Local logs / run artefacts
+streamlit_*.log

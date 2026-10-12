@@ -1,0 +1,10 @@
+paddlepaddle==2.6.2          # PP-OCRv4 engine; use paddlepaddle-gpu==2.6.2 for NVIDIA GPU
+paddleocr==2.7.3
+onnxruntime==1.19.2          # PP-OCRv5 engine (1.19 keeps protobuf<=3.20, which Paddle 2.6 needs)
+numpy<2
+opencv-python-headless
+Pillow
+pypdfium2
+PyYAML
+pyclipper
+shapely
