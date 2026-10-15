@@ -15,3 +15,6 @@ OCR Software/
 
 # Local logs / run artefacts
 streamlit_*.log
+
+# Local backups
+*.bak

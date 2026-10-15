@@ -1,10 +1,11 @@
 """
-OCR vs VLM Comparison App
+OCR Platform
 Accord Business Group
 Compare OCR (Tesseract / EasyOCR / PaddleOCR) vs GPT-4o Vision on PDF/image files
 """
 
 import streamlit as st
+import pandas as pd
 import pytesseract
 from PIL import Image
 import pdf2image
@@ -74,6 +75,52 @@ def get_local_docai(langs, engine="paddle_v4"):
     from app.pipeline import DocumentAI
     return DocumentAI(Config(languages=list(langs), engine=engine))
 
+# --- Online model ids ------------------------------------------------------------
+# The API wants the exact lowercase id ("gpt-4o"), never a display name ("GPT-4o").
+_DEFAULT_ONLINE_MODELS = ["gpt-4o", "gpt-4o-mini"]
+_NON_CHAT = ("embedding", "audio", "tts", "whisper", "realtime", "transcribe", "image", "moderation",
+             "search", "instruct", "dall-e", "davinci", "babbage", "codex", "computer-use", "diarize")
+
+
+def normalize_model_id(model: str) -> str:
+    """'GPT-4o' / 'gpt 4o' -> 'gpt-4o'. Fine-tunes (ft:...) and other ids are left untouched."""
+    m = (model or "").strip()
+    if m.lower().startswith(("gpt", "o1", "o3", "o4", "chatgpt")) and not m.lower().startswith("ft:"):
+        m = "-".join(m.lower().split())
+    return m
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _list_account_models(key_hash: str, api_key: str) -> list:
+    import httpx
+    client = openai.OpenAI(api_key=api_key, http_client=httpx.Client(), timeout=15)
+    ids = [m.id for m in client.models.list()]
+    keep = [i for i in ids if i.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
+            and not any(k in i for k in _NON_CHAT) and not re.search(r"-(\d{4}-\d{2}-\d{2}|\d{4})$", i)]
+    return sorted(set(keep))
+
+
+def _online_model_ids(api_key: str) -> list:
+    """Models this API key can really use; the built-in defaults while there is no key or listing fails."""
+    if api_key:
+        try:
+            ids = _list_account_models(hashlib.sha256(api_key.encode()).hexdigest()[:12], api_key)
+            if ids:
+                return ids if "gpt-4o" not in ids else ["gpt-4o"] + [i for i in ids if i != "gpt-4o"]
+        except Exception:
+            pass
+    return list(_DEFAULT_ONLINE_MODELS)
+
+
+def _summary_mod():
+    """Key-field table logic (lives in the engine package)."""
+    import sys
+    if LOCAL_DOC_AI_DIR not in sys.path:
+        sys.path.insert(0, LOCAL_DOC_AI_DIR)
+    from app.templates import summary
+    return summary
+
+
 # ─── Arabic RTL character-order fix ───────────────────────────────────────────
 # Tesseract has a well-known upstream limitation: on short/isolated RTL text
 # blocks (e.g. single-word ID-card fields), it sometimes emits each Arabic
@@ -87,8 +134,8 @@ def fix_arabic_rtl(text: str) -> str:
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="OCR vs VLM Comparison",
-    page_icon="🔬",
+    page_title="OCR Platform",
+    page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -96,83 +143,205 @@ st.set_page_config(
 # ─── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .stApp { background-color: #f5f7fa; color: #1a1a2e !important; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Cairo:wght@400;600;700&display=swap');
+
+    :root {
+        --ink: #0f172a;  --muted: #64748b;  --line: #e2e8f0;
+        --brand: #4f46e5; --brand-2: #7c3aed; --accent: #06b6d4; --ok: #10b981;
+        --surface: #ffffff; --bg: #f4f6fb;
+    }
+
+    /* ---- base ---------------------------------------------------------- */
+    html, body, .stApp, [class*="css"] { font-family: 'Inter', 'Cairo', 'Segoe UI', system-ui, sans-serif; }
+    .stApp {
+        background:
+            radial-gradient(1100px 500px at 100% -10%, rgba(124,58,237,0.10), transparent 60%),
+            radial-gradient(900px 500px at -10% 0%, rgba(6,182,212,0.08), transparent 55%),
+            var(--bg);
+        color: var(--ink) !important;
+    }
     .stApp p, .stApp span, .stApp div, .stApp label,
     .stApp h1, .stApp h2, .stApp h3, .stApp h4,
     .stMarkdown, .stMarkdown p, .stMarkdown li,
     [data-testid="stMetricLabel"], [data-testid="stMetricValue"],
     .stSelectbox label, .stSlider label, .stTextInput label,
-    .stTextArea label, .stFileUploader label { color: #1a1a2e !important; }
+    .stTextArea label, .stFileUploader label { color: var(--ink) !important; }
+    .block-container { max-width: 1320px; padding-top: 1.4rem; padding-bottom: 3rem; }
+    h3 { font-weight: 700; letter-spacing: -0.01em; }
 
+    /* hide Streamlit chrome that does not belong to a product UI */
+    [data-testid="stDecoration"], [data-testid="stDeployButton"], footer { display: none !important; }
+    [data-testid="stHeader"] { background: transparent; }
+
+    /* ---- sidebar ------------------------------------------------------------ */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #1a1a6e 0%, #3b3bbf 100%);
+        background: linear-gradient(180deg, #0b1020 0%, #151a3d 55%, #24206b 100%);
+        border-right: 1px solid rgba(255,255,255,0.06);
     }
-    [data-testid="stSidebar"] * { color: white !important; }
-    [data-testid="stSidebar"] input,
-    [data-testid="stSidebar"] textarea,
-    [data-testid="stSidebar"] select { color: #1a1a2e !important; background: white !important; }
-    [data-testid="stSidebar"] .stMarkdown h1,
-    [data-testid="stSidebar"] .stMarkdown h2,
-    [data-testid="stSidebar"] .stMarkdown h3 { color: white !important; }
-
-    .result-card {
-        background: white;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-        margin-bottom: 16px;
-        border-left: 4px solid #3b3bbf;
+    /* .stApp prefix: beats the generic ".stApp p/span/label" dark-text rule above */
+    .stApp [data-testid="stSidebar"], .stApp [data-testid="stSidebar"] *,
+    .stApp [data-testid="stSidebar"] p, .stApp [data-testid="stSidebar"] span,
+    .stApp [data-testid="stSidebar"] label, .stApp [data-testid="stSidebar"] div { color: #ffffff !important; }
+    [data-testid="stSidebarUserContent"] { padding: 0.6rem 1rem 0.5rem 1rem !important; }
+    [data-testid="stSidebarHeader"] { height: 2rem !important; padding: 0.4rem 1rem !important; }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: clamp(0.2rem, 1.7vh, 1.6rem) !important; justify-content: space-between; }
+    /* spread over the whole sidebar height; footer pinned to the bottom */
+    [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"],
+    [data-testid="stSidebarUserContent"] [data-testid="stVerticalBlock"]:first-child { min-height: min(calc(100vh - 4.6rem), 860px); }
+    [data-testid="stSidebar"] .element-container:has(h3), [data-testid="stSidebar"] [data-testid="stElementContainer"]:has(h3) { margin-bottom: -0.55rem !important; }
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] { margin-bottom: 0 !important; min-height: 0 !important; }
+    [data-testid="stSidebar"] .stSelectbox, [data-testid="stSidebar"] .stTextInput,
+    [data-testid="stSidebar"] .stCheckbox { margin-bottom: 0 !important; }
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div { min-height: 38px !important; height: 38px !important; align-items: center !important; }
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div > div { padding-top: 0 !important; padding-bottom: 0 !important; }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] { width: 92% !important; }
+    [data-testid="stSidebar"] input { padding-top: 6px !important; padding-bottom: 6px !important; }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
+    [data-testid="stSidebar"] h3, .stApp [data-testid="stSidebar"] .stMarkdown h3 {
+        margin: 0 !important; padding: 8px 0 12px 0 !important; line-height: 1.3 !important; height: auto !important; }
+    [data-testid="stSidebar"] [data-testid="stHeadingWithActionElements"] { margin: 0 !important; }
+    [data-testid="stSidebar"] .stMarkdown h3 {
+        font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+        margin: 8px 0 0 0 !important; padding: 0 !important; opacity: .75;
     }
-    .result-card.vlm { border-left-color: #10b981; }
-
-    .metric-box {
-        background: white;
-        border-radius: 10px;
-        padding: 16px;
-        text-align: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-        margin: 6px;
+    [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.10) !important; margin: 6px 0 !important; }
+    [data-testid="stSidebar"] label p { font-size: 13px; font-weight: 500; }
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div,
+    [data-testid="stSidebar"] div[data-baseweb="input"] {
+        background: rgba(255,255,255,0.07) !important;
+        border: 1px solid rgba(255,255,255,0.16) !important;
+        border-radius: 12px !important;
+        transition: border-color .15s ease, background .15s ease;
     }
-    .metric-value { font-size: 28px; font-weight: 700; color: #1a1a6e; }
-    .metric-label { font-size: 12px; color: #6b7280; margin-top: 4px; }
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div:hover,
+    [data-testid="stSidebar"] div[data-baseweb="input"]:focus-within {
+        border-color: #818cf8 !important; background: rgba(255,255,255,0.11) !important;
+    }
+    [data-testid="stSidebar"] div[data-baseweb="select"] *,
+    [data-testid="stSidebar"] input { color: #ffffff !important; background: transparent !important; }
+    [data-testid="stSidebar"] div[data-baseweb="base-input"] { background: transparent !important; }
+    [data-testid="stSidebar"] svg { fill: #c7d2fe !important; }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"], .stApp [data-testid="stSidebar"] [data-testid="stCaptionContainer"] * { font-size: 11.5px; line-height: 1.35; }
 
+    .brand { display: flex; align-items: center; gap: 12px; padding: 0 2px 14px 2px; }
+    .brand .mark {
+        width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+        background: linear-gradient(135deg, #6366f1, #a855f7 60%, #06b6d4);
+        box-shadow: 0 6px 18px rgba(99,102,241,0.45); font-weight: 800; font-size: 13px; color: #fff !important;
+        letter-spacing: 0.02em;
+    }
+    .brand .name { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: #fff !important; line-height: 1.1; }
+    .brand .tag  { font-size: 11px; opacity: .75; margin-top: 2px; }
+    .side-foot { margin-top: 4px; padding: 8px 12px; border-radius: 12px; background: rgba(255,255,255,0.05);
+                 border: 1px solid rgba(255,255,255,0.08); }
+    .side-foot b { font-size: 12px; color: #fff !important; }
+    .side-foot span { display: block; font-size: 11px; opacity: .75; margin-top: 1px; }
+
+    /* ---- hero ---------------------------------------------------------------- */
     .app-header {
-        background: linear-gradient(135deg, #1a1a6e 0%, #3b3bbf 100%);
-        color: white;
-        padding: 24px 32px;
-        border-radius: 12px;
-        margin-bottom: 24px;
+        position: relative; overflow: hidden;
+        background: linear-gradient(120deg, #0f172a 0%, #312e81 48%, #6d28d9 100%);
+        padding: 30px 36px; border-radius: 22px; margin-bottom: 22px;
+        box-shadow: 0 18px 40px rgba(49,46,129,0.28);
     }
-    .app-header h1 { color: #ffffff !important; margin: 0; font-size: 28px; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
-    .app-header p { color: white !important; margin: 4px 0 0; }
-
-    .badge-ocr {
-        background: #dbeafe; color: #1e40af;
-        padding: 4px 12px; border-radius: 999px;
-        font-size: 13px; font-weight: 600; display: inline-block;
+    .app-header::before {
+        content: ""; position: absolute; right: -80px; top: -120px; width: 380px; height: 380px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(6,182,212,0.55), transparent 65%);
     }
-    .badge-vlm {
-        background: #d1fae5; color: #065f46;
-        padding: 4px 12px; border-radius: 999px;
-        font-size: 13px; font-weight: 600; display: inline-block;
+    .app-header::after {
+        content: ""; position: absolute; left: 30%; bottom: -160px; width: 360px; height: 360px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(168,85,247,0.40), transparent 65%);
     }
-    .badge-tie {
-        background: #fef3c7; color: #92400e;
-        padding: 4px 12px; border-radius: 999px;
-        font-size: 13px; font-weight: 600; display: inline-block;
+    .stApp .app-header, .stApp .app-header * { color: #ffffff !important; position: relative; z-index: 1; }
+    .app-header h1 { margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -0.02em; }
+    .app-header p  { margin: 8px 0 14px 0; font-size: 14.5px; opacity: .85; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+        padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+        background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.25); backdrop-filter: blur(6px);
     }
 
-    [data-testid="metric-container"] { background: white; border-radius: 10px; padding: 12px; }
+    /* ---- cards / badges ----------------------------------------------------------- */
+    .result-card {
+        background: var(--surface); border-radius: 18px; padding: 22px 24px; margin-bottom: 16px;
+        border: 1px solid var(--line); box-shadow: 0 6px 24px rgba(15,23,42,0.06);
+        border-top: 4px solid var(--brand);
+        transition: transform .18s ease, box-shadow .18s ease;
+    }
+    .result-card:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(15,23,42,0.10); }
+    .result-card.vlm { border-top-color: var(--ok); }
+    .result-card h4 { margin-top: 0; font-weight: 700; }
+    .metric-box { background: var(--surface); border-radius: 14px; padding: 16px; text-align: center;
+                  box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin: 6px; }
+    .metric-value { font-size: 28px; font-weight: 700; color: var(--brand); }
+    .metric-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .badge-ocr, .badge-vlm, .badge-tie { padding: 5px 13px; border-radius: 999px; font-size: 12.5px;
+                                         font-weight: 600; display: inline-block; }
+    .badge-ocr { background: #e0e7ff; color: #3730a3; }
+    .badge-vlm { background: #d1fae5; color: #065f46; }
+    .badge-tie { background: #fef3c7; color: #92400e; }
+
+    .panel-title {
+        display: flex; align-items: center; gap: 10px; padding: 12px 16px; margin-bottom: 14px;
+        border-radius: 14px; font-weight: 700; font-size: 15px; background: var(--surface);
+        border: 1px solid var(--line); box-shadow: 0 4px 14px rgba(15,23,42,0.05);
+    }
+    .panel-title .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .panel-title.ocr .dot { background: var(--brand); box-shadow: 0 0 0 4px rgba(79,70,229,0.18); }
+    .panel-title.vlm .dot { background: var(--ok);    box-shadow: 0 0 0 4px rgba(16,185,129,0.20); }
+    .panel-title small { margin-left: auto; font-weight: 600; color: var(--muted) !important; font-size: 11px; }
+
+    /* ---- widgets ------------------------------------------------------------------ */
+    [data-testid="stFileUploaderDropzone"] {
+        background: var(--surface); border: 2px dashed #c7d2fe; border-radius: 18px; padding: 22px;
+        transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: var(--brand-2); box-shadow: 0 8px 24px rgba(124,58,237,0.12); }
+    [data-testid="stFileUploaderDropzone"] button { border-radius: 10px; }
+
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 12px; font-weight: 600; padding: 0.55rem 1rem; border: 1px solid var(--line);
+        background: var(--surface); color: var(--ink) !important;
+        box-shadow: 0 2px 6px rgba(15,23,42,0.05); transition: all .15s ease;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        border-color: #a5b4fc; transform: translateY(-1px); box-shadow: 0 8px 18px rgba(79,70,229,0.15);
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #4f46e5, #7c3aed); border: none; color: #ffffff !important;
+        box-shadow: 0 8px 20px rgba(99,102,241,0.38);
+    }
+    .stButton > button[kind="primary"] * { color: #ffffff !important; }
+    .stButton > button[kind="primary"]:hover { box-shadow: 0 12px 26px rgba(99,102,241,0.5); }
+    .stButton > button:disabled { opacity: .45; transform: none; box-shadow: none; }
+
+    [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid var(--line); }
+    button[data-baseweb="tab"] { border-radius: 10px 10px 0 0; padding: 8px 16px; font-weight: 600; }
+    button[data-baseweb="tab"][aria-selected="true"] { color: var(--brand) !important; background: rgba(79,70,229,0.07); }
+    [data-baseweb="tab-highlight"] { background: linear-gradient(90deg, #4f46e5, #7c3aed) !important; height: 3px !important; }
+
+    [data-testid="stMetric"], [data-testid="metric-container"] {
+        background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px;
+        box-shadow: 0 4px 14px rgba(15,23,42,0.04);
+    }
+    [data-testid="stMetricValue"] { font-weight: 700; }
+    [data-testid="stAlert"] { border-radius: 14px; }
+    textarea { border-radius: 12px !important; }
+    [data-testid="stExpander"] { border-radius: 14px; border: 1px solid var(--line); background: var(--surface); }
+    [data-testid="stImage"] img { border-radius: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🔬 OCR vs VLM")
-    st.markdown("**Comparison Lab**")
-    st.markdown("---")
+    st.markdown("""
+<div class="brand">
+  <div class="mark">OCR</div>
+  <div><div class="name">OCR Platform</div><div class="tag">Documents · Local &amp; Online AI</div></div>
+</div>
+""", unsafe_allow_html=True)
 
-    st.markdown("### ⚙️ Settings")
+    st.markdown("### Settings")
 
     api_key = st.text_input(
         "OpenAI API Key",
@@ -181,27 +350,59 @@ with st.sidebar:
         placeholder="sk-..."
     )
 
+    _online_options = _online_model_ids(api_key) + ["Custom model ID..."]
+    _online_choice = st.selectbox(
+        "Online model",
+        options=_online_options,
+        index=0,
+        help="OpenAI vision model used for the VLM side (the list comes from your account once the "
+             "API key is entered). Needs the API key above.",
+    )
+    if _online_choice == "Custom model ID...":
+        vlm_model = st.text_input(
+            "Model ID",
+            value="",
+            placeholder="exact OpenAI model id",
+            help="Type the exact API model id of any OpenAI vision-capable model.",
+        ).strip()
+    else:
+        vlm_model = _online_choice
+
     st.markdown("---")
-    st.markdown("### 🔤 OCR Engine")
+    st.markdown("### Models")
 
     ocr_engine = st.selectbox(
-        "OCR Engine",
+        "Local model",
         options=[
             "Tesseract OCR",
             "Easy OCR",
             "Paddle OCR",
             "ABG OCR",
+            "PaddleOCR-VL",
         ],
         index=0,
+        help="Runs on this computer - no internet needed.",
     )
+
+    doc_type = st.selectbox(
+        "Document type",
+        options=["General", "Egyptian ID card", "Cheque"],
+        index=0,
+        help="Decides which key fields are shown in the Table tab (and asked from the online model). "
+             "ID card: name, birth date, address, 14-digit national number. "
+             "Cheque: customer name, amount, cheque date, bank name. "
+             "Works with every local model (ABG OCR reads fields from the image and is the most accurate).",
+    )
+
+    st.markdown("---")
 
     # Language selection depends on engine
     ocr_lang = None
     easyocr_langs = None
     paddle_langs = None
     local_langs = None
-    id_mode = False
-    cheque_mode = False
+    id_mode = doc_type == "Egyptian ID card"
+    cheque_mode = doc_type == "Cheque"
     local_engine = "paddle_v4"
     fix_rtl = False
 
@@ -261,17 +462,10 @@ with st.sidebar:
         if local_engine == "onnx_v5" and not _v5_ready:
             st.warning("onnxruntime is not installed - falling back to Fast.")
             local_engine = "paddle_v4"
-        _doc = st.selectbox(
-            "Document type",
-            options=["General", "Egyptian ID card", "Cheque"],
-            index=0,
-            help="ID card: crops/straightens the card, reads the 14-digit national number digit by "
-                 "digit and validates it. Cheque: finds the date, payee and amounts next to their "
-                 "labels and cross-checks the amount in words against the digits. "
-                 "Parsed fields appear under 'Structured output'."
-        )
-        id_mode = _doc == "Egyptian ID card"
-        cheque_mode = _doc == "Cheque"
+    elif ocr_engine == "PaddleOCR-VL":
+        st.caption("Experimental. 0.9B vision-language page parser. On this CPU it needs ~2.5 min "
+                   "per page and ~4.5 GB of free RAM. In our Arabic cheque test it misread Arabic "
+                   "words and skipped a line, so verify its output; ABG OCR was more accurate.")
     else:  # PaddleOCR
         ocr_lang_display = st.selectbox(
             "Language",
@@ -300,35 +494,26 @@ with st.sidebar:
     )
 
     st.markdown("---")
-
-    vlm_model = st.selectbox(
-        "VLM Model",
-        options=["gpt-4o", "gpt-4o-mini"],
-        index=0
-    )
-
-    st.markdown("---")
-    st.markdown("**ABG · Accord Business Group**")
-    st.markdown("*Local → Cloud Pipeline*")
+    st.markdown("""
+<div class="side-foot"><b>ABG · Accord Business Group</b><span>Local → Cloud pipeline</span></div>
+""", unsafe_allow_html=True)
 
 # Fixed defaults
 dpi = 300
 max_pages = 3
-vlm_prompt = (
-    "Extract all text and data from this image. "
-    "Return as valid JSON with keys: "
-    "\"text\" (full text), \"fields\" (key-value pairs found), "
-    "\"tables\" (any tabular data), \"language\" (detected language), "
-    "\"confidence\" (your confidence 0-100), "
-    "\"notes\" (any observations)."
-)
+vlm_prompt = _summary_mod().vlm_prompt(doc_type)
 
 # ─── Header ──────────────────────────────────────────────────────────────────────
 engine_label = ocr_engine
 st.markdown(f"""
 <div class="app-header">
-    <h1>🔬 OCR vs VLM — Live Comparison</h1>
-    <p>Upload a PDF or image · Run {engine_label} &amp; GPT-4o Vision · Compare side-by-side</p>
+    <h1>OCR Platform</h1>
+    <p>Upload a PDF or image, read it with a local model and an online vision model, and compare the results side by side.</p>
+    <div class="chips">
+        <span class="chip">Local · {engine_label}</span>
+        <span class="chip">Online · {vlm_model or "—"}</span>
+        <span class="chip">Document · {doc_type}</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -548,12 +733,33 @@ def run_local_id_card(images: list, lang_codes: list, engine: str = "paddle_v4")
     return {
         "text": full_text,
         "structured": cards if len(cards) > 1 else cards[0],
+        "template_fields": True,
         "pages": len(images),
         "word_count": len(full_text.split()),
         "char_count": len(full_text),
         "time_sec": round(elapsed, 2),
         "cost_usd": 0.0,
         "engine": f"ABG OCR · Egyptian ID · {engine[-2:].upper()} ({', '.join(lang_codes)})",
+    }
+
+
+def run_paddleocr_vl(images: list) -> dict:
+    """PaddleOCR-VL (experimental, slow): one-shot subprocess in the isolated Paddle-3 environment."""
+    start = time.time()
+    import sys
+    if LOCAL_DOC_AI_DIR not in sys.path:
+        sys.path.insert(0, LOCAL_DOC_AI_DIR)
+    from app.ocr.paddle_vl import parse_images, blocks_to_text
+    result = parse_images(images)
+    full_text = blocks_to_text(result["pages"])
+    return {
+        "text": full_text,
+        "pages": len(images),
+        "word_count": len(full_text.split()),
+        "char_count": len(full_text),
+        "time_sec": round(time.time() - start, 2),
+        "cost_usd": 0.0,
+        "engine": result.get("model", "PaddleOCR-VL"),
     }
 
 
@@ -576,6 +782,7 @@ def run_local_cheque(images: list, lang_codes: list, engine: str = "paddle_v4") 
     return {
         "text": full_text,
         "structured": cheques if len(cheques) > 1 else cheques[0],
+        "template_fields": True,
         "expand_structured": True,
         "pages": len(images),
         "word_count": len(full_text.split()),
@@ -611,6 +818,8 @@ def run_ocr_engine(images: list, engine: str, lang: str, easyocr_langs: list,
                     local_langs: list = None, id_mode: bool = False,
                     local_engine: str = "paddle_v4", cheque_mode: bool = False) -> dict:
     """Dispatch to the selected OCR engine."""
+    if engine == "PaddleOCR-VL":
+        return run_paddleocr_vl(images)
     if engine == "ABG OCR":
         if cheque_mode:
             return run_local_cheque(images, local_langs, local_engine)
@@ -625,8 +834,40 @@ def run_ocr_engine(images: list, engine: str, lang: str, easyocr_langs: list,
         return run_tesseract(images, lang, fix_rtl)
 
 
+# USD per 1M tokens (input, output). Unknown models are still usable, cost just shows n/a.
+MODEL_PRICES = {"gpt-4o": (2.50, 10.00), "gpt-4o-mini": (0.15, 0.60), "o4-mini": (1.10, 4.40)}
+
+
+def _chat_json(client, model: str, messages: list):
+    """Chat call that works across model families.
+
+    Newer / reasoning models (o-series, gpt-5+) reject ``max_tokens`` and spend part of the
+    budget on hidden reasoning, so use ``max_completion_tokens`` with a larger budget for them.
+    Falls back to the legacy parameters / plain text if a model rejects them."""
+    reasoning = model.startswith(("o1", "o3", "o4")) or "gpt-5" in model or "gpt-6" in model
+    limit = 16000 if reasoning else 4000
+    base = dict(model=model, messages=messages)
+    attempts = [
+        dict(response_format={"type": "json_object"}, max_completion_tokens=limit),
+        dict(response_format={"type": "json_object"}, max_tokens=limit),
+        dict(max_completion_tokens=limit),
+    ]
+    last = None
+    for extra in attempts:
+        try:
+            return client.chat.completions.create(**base, **extra)
+        except Exception as e:                       # try the next parameter style
+            last = e
+            msg = str(e).lower()
+            if not any(k in msg for k in ("max_tokens", "max_completion_tokens", "response_format",
+                                          "unsupported", "unknown parameter", "json")):
+                raise
+    raise last
+
+
 def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
     import httpx
+    model = normalize_model_id(model)
     client = openai.OpenAI(api_key=api_key, http_client=httpx.Client())
     start = time.time()
     all_results = []
@@ -643,11 +884,8 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
             ]
         }]
         try:
-            resp = client.chat.completions.create(
-                model=model, messages=messages,
-                response_format={"type": "json_object"}, max_tokens=4000
-            )
-            content = resp.choices[0].message.content
+            resp = _chat_json(client, model, messages)
+            content = resp.choices[0].message.content or ""
             total_input_tokens += resp.usage.prompt_tokens
             total_output_tokens += resp.usage.completion_tokens
             try:
@@ -657,13 +895,15 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
             parsed["_page"] = i + 1
             all_results.append(parsed)
         except Exception as e:
-            all_results.append({"_page": i + 1, "error": str(e)})
+            err = str(e)
+            if "model_not_found" in err or "does not exist" in err:
+                err += (f"\n-> '{model}' is not available to this API key. Pick a model from the "
+                        "list (it shows what your account can use) or type an exact id.")
+            all_results.append({"_page": i + 1, "error": err})
 
     elapsed = time.time() - start
-    if model == "gpt-4o":
-        cost = (total_input_tokens / 1_000_000 * 2.50) + (total_output_tokens / 1_000_000 * 10.00)
-    else:
-        cost = (total_input_tokens / 1_000_000 * 0.15) + (total_output_tokens / 1_000_000 * 0.60)
+    price = MODEL_PRICES.get(model)
+    cost = ((total_input_tokens / 1_000_000 * price[0]) + (total_output_tokens / 1_000_000 * price[1])) if price else 0.0
 
     combined_text = ""
     for r in all_results:
@@ -676,9 +916,14 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
         "input_tokens": total_input_tokens,
         "output_tokens": total_output_tokens,
         "cost_usd": round(cost, 4),
+        "cost_known": price is not None,
         "time_sec": round(elapsed, 2),
         "model": model,
     }
+
+
+def fmt_cost(res: dict) -> str:
+    return f"${res['cost_usd']:.4f}" if res.get("cost_known", True) else "n/a"
 
 
 def count_words(text: str) -> int:
@@ -687,7 +932,7 @@ def count_words(text: str) -> int:
 
 def build_comparison_table(ocr_result: dict, vlm_result: dict) -> dict:
     eng = ocr_result.get("engine", "OCR")
-    arabic_note = "✅ Native Arabic" if ("Easy OCR" in eng or "Paddle OCR" in eng or "ABG OCR" in eng) else "⚠️ Requires ara pack"
+    arabic_note = "✅ Native Arabic" if ("Easy OCR" in eng or "Paddle OCR" in eng or "ABG OCR" in eng or "PaddleOCR-VL" in eng) else "⚠️ Requires ara pack"
     return {
         "Speed (sec)": {
             "OCR": ocr_result["time_sec"],
@@ -696,7 +941,7 @@ def build_comparison_table(ocr_result: dict, vlm_result: dict) -> dict:
         },
         "Cost (USD)": {
             "OCR": f"${ocr_result['cost_usd']:.4f}",
-            "VLM": f"${vlm_result['cost_usd']:.4f}",
+            "VLM": fmt_cost(vlm_result),
             "Winner": "OCR"
         },
         "Words Extracted": {
@@ -727,45 +972,257 @@ def build_comparison_table(ocr_result: dict, vlm_result: dict) -> dict:
     }
 
 
-def show_decision_framework():
-    st.markdown("### 🧭 Decision Framework")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("""
-<div class="result-card">
-<h4>✅ Use OCR (offline) when:</h4>
-<ul>
-<li>High volume, low cost is priority</li>
-<li>Offline / air-gapped environment</li>
-<li>Printed text (no complex tables)</li>
-<li>No API key / internet required</li>
-<li><b>Easy OCR</b>: better Arabic accuracy</li>
-<li><b>Tesseract OCR</b>: fastest, lightest</li>
-</ul>
-<span class="badge-ocr">Best for: Bulk text extraction</span>
-</div>
-""", unsafe_allow_html=True)
-    with col2:
-        st.markdown("""
-<div class="result-card vlm">
-<h4>✅ Use VLM (GPT-4o Vision) when:</h4>
-<ul>
-<li>Forms with key-value pairs to extract</li>
-<li>Tables, charts, or structured data</li>
-<li>Low volume, high accuracy needed</li>
-<li>Semantic understanding required</li>
-<li>Output must be structured JSON</li>
-<li>Handwritten or noisy documents</li>
-</ul>
-<span class="badge-vlm">Best for: Banking forms, contracts, reports</span>
-</div>
-""", unsafe_allow_html=True)
+def _entry_row(entry: dict, doc: str):
+    """Key-field row of one saved run for document type ``doc`` (None if it cannot be derived)."""
+    summary, res = _summary_mod(), entry["result"]
+    if entry["kind"] == "ocr":
+        if res.get("template_fields") and entry["doc_type"] == doc:
+            st_ = res["structured"]
+            items = st_ if isinstance(st_, list) else [st_]
+        else:                                      # any other local model: parse its plain text
+            items = _summary_mod_text().fields_from_text(doc, res["text"])
+        out = summary.template_summary(doc, items[0]) if items else None
+        return out[0] if out else None
+    if entry["doc_type"] != doc:                   # the online answer was asked for other fields
+        return None
+    pages = [p for p in res["results"] if "error" not in p]
+    return summary.vlm_summary(doc, pages[0])[0] if pages else None
+
+
+REFERENCE_MODEL = "gpt-4o"   # the ONLY model treated as the correct answer in the comparison
+
+
+def _is_reference_label(label: str) -> bool:
+    return normalize_model_id(label) == REFERENCE_MODEL
+
+
+def _entry_text(entry: dict) -> str:
+    """All text a saved run produced (used to compare General documents)."""
+    res = entry["result"]
+    if entry["kind"] == "ocr":
+        return res.get("text", "")
+    parts = [res.get("combined_text", "")]
+    for p in res.get("results", []):
+        if "error" not in p:
+            parts += [v for _, v in _summary_mod().flatten_fields({k: x for k, x in p.items() if k != "text"})]
+    return " ".join(parts)
+
+
+def show_compare(hist: dict, current_fhash=None) -> None:
+    """Field-by-field comparison of the saved runs of one document against the reference model (gpt-4o)."""
+    from importlib import import_module
+    _summary_mod()
+    ref_mod = import_module("app.templates.compare_ref")
+    entries = list(hist.values())
+    docs = {}
+    for e in entries:
+        docs.setdefault(e.get("fhash", e["file"]), e["file"])
+    order = sorted(docs, key=lambda k: k != current_fhash)             # current document first
+    key = order[0]
+    if len(order) > 1:
+        key = st.selectbox("Document", order, format_func=lambda k: docs[k], key="cmp_doc")
+    doc_choices = ["Egyptian ID card", "Cheque", "General"]
+    doc = st.radio("Compare fields of", doc_choices, horizontal=True, key="cmp_doc_type",
+                   index=doc_choices.index(doc_type) if doc_type in doc_choices else 2)
+    general = doc == "General"
+
+    # --- the reference: an online run of this document with the same document type
+    cands = {}
+    for idx, e in enumerate(entries):
+        if e.get("fhash", e["file"]) != key or e["kind"] != "vlm" or e.get("doc_type", "General") != doc:
+            continue
+        if any("error" not in p for p in e["result"].get("results", [])):
+            cands[f"{e['label']}  ({e['at']})"] = e
+    ref_names = [n for n, e in cands.items() if _is_reference_label(e["label"])]
+    if not ref_names:
+        st.warning("No reference yet. Run the online model **gpt-4o** on this document with document type "
+                   f"**{doc}** (sidebar), then come back - every other model is scored against it.")
+        if cands:
+            st.caption("Online runs available as a reference: " + ", ".join(cands))
+        return
+    ref_name = st.selectbox("Reference: gpt-4o (treated as the correct answer)", list(cands),
+                            index=list(cands).index(ref_names[-1]), key="cmp_ref")
+    ref_entry = cands[ref_name]
+    ref_page = next(p for p in ref_entry["result"]["results"] if "error" not in p)
+    ref_row = None if general else _summary_mod().vlm_summary(doc, ref_page)[0]
+    fields = ref_mod.reference_fields(doc, ref_row, ref_page)
+    if not any(str(v).strip() for _, _, v in fields):
+        st.warning("The reference returned no values for this document type, so there is nothing to compare against.")
+        return
+
+    # --- the models to score (everything except the reference run itself)
+    rows_in, skipped, seen = [], [], {}
+    for e in entries:
+        if e is ref_entry or e.get("fhash", e["file"]) != key:
+            continue
+        name = ("Local · " if e["kind"] == "ocr" else "Online · ") + e["label"]
+        seen[name] = seen.get(name, 0) + 1
+        if seen[name] > 1:
+            name += f" #{seen[name]}"
+        item = {"label": name, "time": e["result"]["time_sec"]}
+        if general:
+            item["text"] = _entry_text(e)
+        else:
+            row = _entry_row(e, doc)
+            if row is None:
+                skipped.append(name)
+                continue
+            item["row"] = row
+        rows_in.append(item)
+    if not rows_in:
+        st.info("Nothing to score yet - run another model on this document (with this document type for online models).")
+        return
+    ref_label = "Reference · " + ref_entry["label"]
+    headers, rows, avgs, best, notes = ref_mod.compare_to_reference(doc, fields, rows_in, ref_label)
+    st.markdown(_summary_mod().html_table(headers, rows, max_height=600, highlight_headers=[ref_label]),
+                unsafe_allow_html=True)
+    for n in notes:
+        st.warning(n)
+    if len(rows_in) > 1:
+        top = [rows_in[i]["label"] for i, sc in enumerate(avgs) if sc == avgs[best]]
+        st.success(f"Closest to the reference: **{rows_in[best]['label']}** ({avgs[best]:.0f}% average)"
+                   + (f" - tied with {', '.join(t for t in top if t != rows_in[best]['label'])}; the faster one is shown."
+                      if len(top) > 1 else ""))
+    else:
+        st.info(f"{rows_in[0]['label']}: {avgs[0]:.0f}% average against the reference. Run another model to compare.")
+    if skipped:
+        st.caption("Not comparable (online answer was requested for a different document type): " + ", ".join(skipped))
+    st.caption("Each cell: found? · correctness vs the reference. Names / addresses / text = share of the "
+               "reference's words that the model also wrote; national ID = all 14 digits must match; "
+               "amount and date = same value. The reference is not scored. The score is an average of the "
+               "fields the reference has. First page of each document is compared.")
+
+
+def show_history(current_fhash=None) -> None:
+    """Every run made in this session (kept until cleared) + a status comparison of the runs."""
+    hist = st.session_state.get("history", {})
+    if not hist:
+        return
+    st.markdown("---")
+    tab_hist, tab_cmp = st.tabs([f"🕘 History ({len(hist)})", "⚖️ Comparison"])
+    with tab_cmp:
+        show_compare(hist, current_fhash)
+    with tab_hist:
+        if st.button("🗑️ Clear all", key="clear_history"):
+            st.session_state.history = {}
+            st.rerun()
+        for i, (hkey, entry) in enumerate(reversed(list(hist.items()))):
+            res = entry["result"]
+            tag = "LOCAL" if entry["kind"] == "ocr" else "ONLINE"
+            title = f"{tag} · {entry['label']} · {entry['doc_type']} · {entry['file']} · {res['time_sec']}s · {entry['at']}"
+            c_entry, c_del = st.columns([14, 1])
+            with c_del:
+                if st.button("🗑️", key=f"del_{abs(hash(str(hkey)))}", help="Delete this item"):
+                    hist.pop(hkey, None)
+                    st.rerun()
+            with c_entry:
+                with st.expander(title, expanded=False):
+                    res = {**res, "doc_type": entry["doc_type"]}
+                    t_table, t_raw = st.tabs(["📊 Table", "🧾 Raw data"])
+                    with t_table:
+                        (show_ocr_table if entry["kind"] == "ocr" else show_vlm_table)(res)
+                    with t_raw:
+                        text = res["text"] if entry["kind"] == "ocr" else res["combined_text"]
+                        st.text_area("Text", value=text, height=240, key=f"hist_text_{i}")
+
+
+def _table(df: "pd.DataFrame") -> None:
+    """Render a DataFrame (columns given left-to-right) as an RTL table with every value
+    right-aligned. st.dataframe cannot align cells, so this is HTML (values are escaped)."""
+    rows = df.astype(str).values.tolist()
+    st.markdown(_summary_mod().html_table([str(c) for c in df.columns], rows), unsafe_allow_html=True)
+
+
+def _vertical_table(columns: list, rows: list) -> None:
+    """One field per row; the FIELD column is on the right (read right-to-left: field - value)."""
+    headers, data = _summary_mod().vertical_table(columns, rows)
+    _table(pd.DataFrame(data, columns=headers))
+
+
+def _pairs_table(pairs: list) -> None:
+    headers, data = _summary_mod().pairs_table(pairs)
+    _table(pd.DataFrame(data, columns=headers))
+
+
+def _summary_mod_text():
+    _summary_mod()                                # puts local-document-ai on sys.path
+    from app.templates import text_fields
+    return text_fields
+
+
+def _warnings(items: list) -> None:
+    for w in dict.fromkeys(items):              # unique, order kept
+        st.warning(w)
+
+
+def show_ocr_table(res: dict) -> None:
+    """Key fields of the local model result (ID card / cheque via ABG OCR), else the lines read."""
+    summary = _summary_mod()
+    doc = res.get("doc_type", "General")
+    structured = res.get("structured")
+    from_text = False
+    if doc != "General" and not (structured and res.get("template_fields")):
+        structured = _summary_mod_text().fields_from_text(doc, res["text"])      # any engine: parse its text
+        from_text = True
+    if doc != "General" and structured:
+        items = structured if isinstance(structured, list) else [structured]
+        rows, warns = [], []
+        for it in items:
+            out = summary.template_summary(doc, it)
+            if out:
+                rows.append(out[0])
+                warns += out[1]
+        if rows:
+            _vertical_table(summary.columns_for(doc), rows)
+            if from_text:
+                warns.append("Fields were parsed from this model's plain text; ABG OCR reads them from the image and is more accurate.")
+            _warnings(warns)
+            return
+    lines = [ln for ln in res["text"].splitlines() if ln.strip() and not ln.startswith("--- Page Break")]
+    _table(pd.DataFrame({"Text": lines, "#": range(1, len(lines) + 1)}))
+
+
+def show_vlm_table(res: dict) -> None:
+    """Key fields the online model returned for the chosen document type."""
+    summary = _summary_mod()
+    doc = res.get("doc_type", "General")
+    pages = [p for p in res["results"] if "error" not in p]
+    for p in res["results"]:
+        if "error" in p:
+            st.error(p["error"])
+    if not pages:
+        return                                   # only errors: no empty table under them
+    if doc != "General":
+        rows, warns = [], []
+        for p in pages:
+            row, w = summary.vlm_summary(doc, p)
+            rows.append(row)
+            warns += w
+        _vertical_table(summary.columns_for(doc), rows)
+        _warnings(warns)
+        return
+    rows = []
+    for p in pages:
+        if isinstance(p.get("fields"), dict):
+            rows += summary.flatten_fields(p["fields"])
+    if rows:
+        _pairs_table(rows)
+    else:
+        lines = [ln for ln in res["combined_text"].splitlines() if ln.strip()]
+        _table(pd.DataFrame({"Text": lines, "#": range(1, len(lines) + 1)}))
+
+
+def show_fields_table(obj) -> None:
+    """Every field of a structured result (raw-data view)."""
+    rows = _summary_mod().flatten_fields(obj)
+    if rows:
+        st.markdown("**All extracted fields**")
+        _pairs_table(rows)
 
 
 # ─── Main Logic ──────────────────────────────────────────────────────────────────
 if uploaded_file is None:
-    st.markdown("---")
-    show_decision_framework()
+    show_history()
 else:
     file_bytes = uploaded_file.read()
     file_ext = Path(uploaded_file.name).suffix.lower()
@@ -796,73 +1253,76 @@ else:
     col_btn1, col_btn2, col_btn3 = st.columns(3)
     run_ocr = col_btn1.button("⚡ Run OCR Only", use_container_width=True, type="secondary")
     run_vlm_only = col_btn2.button("🤖 Run VLM Only", use_container_width=True, type="secondary",
-                                    disabled=not api_key)
+                                    disabled=not api_key or not vlm_model)
     run_both = col_btn3.button("🔬 Run BOTH & Compare", use_container_width=True, type="primary",
-                                disabled=not api_key)
+                                disabled=not api_key or not vlm_model)
 
     if not api_key and (run_vlm_only or run_both):
         st.warning("⚠️ Enter your OpenAI API key in the sidebar to use VLM.")
 
-    if "ocr_result" not in st.session_state:
-        st.session_state.ocr_result = None
-    if "vlm_result" not in st.session_state:
-        st.session_state.vlm_result = None
+    # Every run is kept in session history, keyed by (document, model, settings): picking another
+    # model never discards earlier results, and re-running the same thing reuses the saved result.
+    import hashlib
+    hist = st.session_state.setdefault("history", {})
+    fhash = hashlib.md5(file_bytes).hexdigest()
+    _abg = ocr_engine == "ABG OCR"
+    ocr_key = ("ocr", fhash, ocr_engine, doc_type if _abg else "-", str(ocr_lang), str(easyocr_langs),
+               str(paddle_langs), fix_rtl, str(local_langs), local_engine, enhance_image)
+    vlm_key = ("vlm", fhash, vlm_model, doc_type)
 
-    if run_ocr or run_both:
+    def _save(key, kind, label, result):
+        result["doc_type"] = doc_type
+        hist[key] = {"kind": kind, "label": label, "doc_type": doc_type, "file": uploaded_file.name,
+                     "result": result, "at": time.strftime("%H:%M:%S"), "fhash": fhash}
+
+    if (run_ocr or run_both) and ocr_key in hist:
+        st.info(f"♻️ {ocr_engine}: using the saved result for this document (not re-run). "
+                "Clear the history to run it again.")
+    elif run_ocr or run_both:
         spinner_msg = f"⚡ Running {ocr_engine}... first run loads the models, please wait"
         with st.spinner(spinner_msg):
             try:
-                own_preprocessing = ocr_engine == "ABG OCR"
+                own_preprocessing = ocr_engine in ("ABG OCR", "PaddleOCR-VL")
                 ocr_images = (
                     [preprocess_for_ocr(img) for img in images]
                     if enhance_image and not own_preprocessing else images
                 )
-                st.session_state.ocr_result = run_ocr_engine(
+                r = run_ocr_engine(
                     ocr_images, ocr_engine, ocr_lang, easyocr_langs, paddle_langs, fix_rtl,
                     local_langs, id_mode, local_engine, cheque_mode
                 )
-                r = st.session_state.ocr_result
+                _save(ocr_key, "ocr", ocr_engine, r)
                 st.success(f"✅ OCR done in {r['time_sec']}s — {r['engine']}")
             except Exception as e:
                 st.error(f"OCR error: {e}")
-                st.session_state.ocr_result = None
 
-    if run_vlm_only or run_both:
+    if (run_vlm_only or run_both) and api_key and vlm_key in hist:
+        st.info(f"♻️ {vlm_model}: using the saved result for this document (not re-run). "
+                "Clear the history to run it again.")
+    elif run_vlm_only or run_both:
         if api_key:
             with st.spinner(f"🤖 Running {vlm_model} Vision... (~5-20s per page)"):
                 try:
-                    st.session_state.vlm_result = run_vlm(images, api_key, vlm_model, vlm_prompt)
-                    r = st.session_state.vlm_result
-                    st.success(f"✅ VLM done in {r['time_sec']}s · Cost: ${r['cost_usd']:.4f}")
+                    r = run_vlm(images, api_key, vlm_model, vlm_prompt)
+                    _save(vlm_key, "vlm", vlm_model, r)
+                    st.success(f"✅ VLM done in {r['time_sec']}s · Cost: {fmt_cost(r)}")
                 except Exception as e:
                     st.error(f"VLM error: {e}")
-                    st.session_state.vlm_result = None
 
-    ocr_res = st.session_state.ocr_result
-    vlm_res = st.session_state.vlm_result
+    # Show the saved result of the CURRENTLY selected models for this document.
+    ocr_res = hist[ocr_key]["result"] if ocr_key in hist else None
+    vlm_res = hist[vlm_key]["result"] if vlm_key in hist else None
+    if ocr_res:
+        ocr_res = {**ocr_res, "doc_type": hist[ocr_key]["doc_type"]}
 
     if ocr_res or vlm_res:
         st.markdown("---")
 
-        if ocr_res and vlm_res:
-            st.markdown("### 📊 Head-to-Head Summary")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("⚡ OCR Speed", f"{ocr_res['time_sec']}s")
-            m2.metric("🤖 VLM Speed", f"{vlm_res['time_sec']}s")
-            m3.metric("💰 OCR Cost", "$0.0000")
-            m4.metric("💰 VLM Cost", f"${vlm_res['cost_usd']:.4f}")
-            st.markdown("---")
-
         left, right = st.columns(2)
 
         with left:
-            engine_label_display = ocr_engine
-            engine_subtitle = ""
             st.markdown(f"""
-<div style="background:#dbeafe;border-radius:8px;padding:12px 16px;margin-bottom:12px;">
-<b style="color:#1e40af;font-size:16px;">⚡ {engine_label_display}</b><br>
-<span style="color:#3b82f6;font-size:12px;">{engine_subtitle}</span>
-</div>
+<div class="panel-title ocr"><span class="dot"></span>{ocr_engine}<small>LOCAL</small></div>
 """, unsafe_allow_html=True)
 
             if ocr_res:
@@ -870,85 +1330,38 @@ else:
                 c1.metric("Time", f"{ocr_res['time_sec']}s")
                 c2.metric("Words", f"{ocr_res['word_count']:,}")
                 c3.metric("Cost", "$0.00")
-                st.text_area("Raw OCR Text", value=ocr_res["text"], height=400, key="ocr_text_display")
-                st.download_button("⬇️ Download OCR Text", data=ocr_res["text"],
-                                   file_name="ocr_output.txt", mime="text/plain")
-                if ocr_res.get("structured"):
-                    structured_json = json.dumps(ocr_res["structured"], ensure_ascii=False, indent=2)
-                    with st.expander("🧱 Structured output", expanded=bool(ocr_res.get("expand_structured"))):
-                        st.code(structured_json, language="json")
-                    st.download_button("⬇️ Download Structured JSON", data=structured_json,
-                                       file_name="document_ai.json", mime="application/json")
+                tab_table, tab_raw = st.tabs(["📊 Table", "🧾 Raw data"])
+                with tab_table:
+                    show_ocr_table(ocr_res)
+                with tab_raw:
+                    st.text_area("Raw OCR Text", value=ocr_res["text"], height=360, key="ocr_text_display")
+                    st.download_button("⬇️ Download OCR Text", data=ocr_res["text"],
+                                       file_name="ocr_output.txt", mime="text/plain")
+                    if ocr_res.get("structured"):
+                        show_fields_table(ocr_res["structured"])
             else:
                 st.info("Run OCR to see results here.")
 
         with right:
-            st.markdown("""
-<div style="background:#d1fae5;border-radius:8px;padding:12px 16px;margin-bottom:12px;">
-<b style="color:#065f46;font-size:16px;">🤖 VLM — GPT-4o Vision</b><br>
-<span style="color:#10b981;font-size:12px;">Structured · Multilingual · JSON</span>
-</div>
+            st.markdown(f"""
+<div class="panel-title vlm"><span class="dot"></span>{vlm_res['model'] if vlm_res else vlm_model}<small>ONLINE</small></div>
 """, unsafe_allow_html=True)
 
             if vlm_res:
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Time", f"{vlm_res['time_sec']}s")
                 c2.metric("Tokens", f"{vlm_res['input_tokens'] + vlm_res['output_tokens']:,}")
-                c3.metric("Cost", f"${vlm_res['cost_usd']:.4f}")
-                tab_json, tab_text, tab_raw = st.tabs(["📋 JSON", "📝 Text", "🔢 Raw"])
-                with tab_json:
-                    for page_result in vlm_res["results"]:
-                        page_num = page_result.get("_page", "?")
-                        with st.expander(f"Page {page_num}", expanded=True):
-                            st.json({k: v for k, v in page_result.items() if k != "_page"})
-                with tab_text:
-                    st.text_area("Extracted Text (from VLM)", value=vlm_res["combined_text"],
-                                 height=400, key="vlm_text_display")
+                c3.metric("Cost", fmt_cost(vlm_res))
+                tab_table, tab_raw = st.tabs(["📊 Table", "🧾 Raw data"])
+                with tab_table:
+                    show_vlm_table(vlm_res)
                 with tab_raw:
-                    st.code(json.dumps(vlm_res["results"], ensure_ascii=False, indent=2), language="json")
-                json_str = json.dumps(vlm_res["results"], ensure_ascii=False, indent=2)
-                st.download_button("⬇️ Download VLM JSON", data=json_str,
-                                   file_name="vlm_output.json", mime="application/json")
+                    st.text_area("Extracted Text (from VLM)", value=vlm_res["combined_text"],
+                                 height=360, key="vlm_text_display")
+                    st.download_button("⬇️ Download VLM Text", data=vlm_res["combined_text"],
+                                       file_name="vlm_output.txt", mime="text/plain")
+                    show_fields_table([{k: v for k, v in p.items() if k != "_page"} for p in vlm_res["results"]])
             else:
                 st.info("Run VLM to see results here.")
 
-        if ocr_res and vlm_res:
-            st.markdown("---")
-            st.markdown("### 📋 Detailed Comparison")
-            comp = build_comparison_table(ocr_res, vlm_res)
-            rows = []
-            for metric, vals in comp.items():
-                rows.append(
-                    f"<tr>"
-                    f"<td><b>{metric}</b></td>"
-                    f"<td>{vals['OCR']}</td>"
-                    f"<td>{vals['VLM']}</td>"
-                    f"</tr>"
-                )
-            table_html = f"""
-<table style="width:100%;border-collapse:collapse;background:white;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
-<thead>
-<tr style="background:#1a1a6e;color:white;">
-<th style="padding:12px 16px;text-align:left;">Metric</th>
-<th style="padding:12px 16px;text-align:left;">⚡ OCR</th>
-<th style="padding:12px 16px;text-align:left;">🤖 VLM</th>
-</tr>
-</thead>
-<tbody>
-{"".join(f'<tr style="border-bottom:1px solid #f0f0f0;">' + row[4:] for row in rows)}
-</tbody>
-</table>
-"""
-            st.markdown(table_html, unsafe_allow_html=True)
-            st.markdown("---")
-            ocr_wins = sum(1 for v in comp.values() if v["Winner"] == "OCR")
-            vlm_wins = sum(1 for v in comp.values() if v["Winner"] == "VLM")
-            if vlm_wins > ocr_wins:
-                st.success(f"🏆 **VLM wins {vlm_wins}-{ocr_wins}** for this document.")
-            elif ocr_wins > vlm_wins:
-                st.info(f"🏆 **OCR wins {ocr_wins}-{vlm_wins}** for this document.")
-            else:
-                st.warning(f"🤝 **Tie {ocr_wins}-{vlm_wins}** — choose based on priority.")
-
-        st.markdown("---")
-        show_decision_framework()
+    show_history(fhash)
