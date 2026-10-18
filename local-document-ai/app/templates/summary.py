@@ -46,8 +46,22 @@ def _pick(data: Dict[str, Any], *keys: str) -> str:
     for k in keys:
         v = norm.get(re.sub(r"[\s_\-]", "", k.lower()))
         if v not in (None, "", [], {}):
-            return v if isinstance(v, str) else str(v)
+            if isinstance(v, str):
+                return v
+            if isinstance(v, (list, tuple)) and all(not isinstance(x, (dict, list, tuple)) for x in v):
+                return " - ".join(str(x).strip() for x in v if str(x).strip())
+            return str(v)
     return ""
+
+
+def _pick_address(data: Dict[str, Any]) -> str:
+    """The address, whatever shape the model used: "address", a list of lines, address_line_1/2, Arabic key..."""
+    got = _pick(data, "address", "العنوان", "address_lines", "full_address", "residence", "address_ar")
+    if got:
+        return got
+    parts = [(str(k), v) for k, v in data.items()
+             if re.sub(r"[\s_\-]", "", str(k).lower()).startswith(("address", "addr")) and isinstance(v, str) and v.strip()]
+    return " - ".join(v.strip() for _, v in sorted(parts))
 
 
 def _as_row(columns: List[str], values: Iterable[str]) -> Dict[str, str]:
@@ -102,7 +116,7 @@ def vlm_prompt(doc_type: str) -> str:
     if doc_type == DOC_ID:
         return ("This is an Egyptian national ID card. " + base +
                 'Keys: "text" (all text on the card), "name" (full name in Arabic), '
-                '"birth_date" (YYYY-MM-DD), "address" (full address in Arabic), '
+                '"birth_date" (YYYY-MM-DD), "address" (the full address in Arabic: copy EVERY printed word of the address lines, top to bottom, exactly as written even if a street or area name looks unusual - leave it empty only if no address text is visible), '
                 '"national_id" (the 14-digit national number, digits only), '
                 '"confidence" (0-100).')
     if doc_type == DOC_CHEQUE:
@@ -124,12 +138,25 @@ def vlm_summary(doc_type: str, page: Dict[str, Any]) -> Tuple[Dict[str, str], Li
     warnings: List[str] = []
     if doc_type == DOC_ID:
         number = _digits(_pick(data, "national_id", "national_number", "id_number", "الرقم القومي"))
+        name = _pick(data, "name", "full_name", "الاسم")
+        address = _pick_address(data)
+        if not (name and address):
+            # A field the model left empty may still be in the card text it returned: read it from there
+            # (only what the model itself wrote - nothing is invented).
+            from .text_fields import id_fields_from_text
+            from_text = id_fields_from_text(str(data.get("text") or ""))
+            if not name and from_text.get("full_name"):
+                name = from_text["full_name"]
+                warnings.append("Name was read from the model's text (its name field was empty)")
+            if not address and from_text.get("address_lines"):
+                address = " - ".join(from_text["address_lines"])
+                warnings.append("Address was read from the model's text (its address field was empty)")
         if len(number) != 14:
             warnings.append(f"The extracted national ID is not 14 digits ({len(number)})")
         row = _as_row(ID_COLUMNS, [
-            _pick(data, "name", "full_name", "الاسم"),
+            name,
             _pick(data, "birth_date", "date_of_birth", "dob", "تاريخ الميلاد"),
-            _pick(data, "address", "العنوان"),
+            address,
             number,
         ])
         return row, warnings

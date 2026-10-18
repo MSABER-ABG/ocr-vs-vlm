@@ -14,6 +14,7 @@ import base64
 import io
 import re
 import time
+import hashlib
 import json
 import os
 import shutil
@@ -77,7 +78,10 @@ def get_local_docai(langs, engine="paddle_v4"):
 
 # --- Online model ids ------------------------------------------------------------
 # The API wants the exact lowercase id ("gpt-4o"), never a display name ("GPT-4o").
-_DEFAULT_ONLINE_MODELS = ["gpt-4o", "gpt-4o-mini"]
+# The ONLY online models offered in the list (shown in this order).
+_DEFAULT_ONLINE_MODELS = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-4o", "gpt-4o-mini"]
+# The ONLY model treated as the correct answer in the comparison tab (also the default online choice).
+REFERENCE_MODEL = "gpt-6.1-sol"
 _NON_CHAT = ("embedding", "audio", "tts", "whisper", "realtime", "transcribe", "image", "moderation",
              "search", "instruct", "dall-e", "davinci", "babbage", "codex", "computer-use", "diarize")
 
@@ -101,12 +105,14 @@ def _list_account_models(key_hash: str, api_key: str) -> list:
 
 
 def _online_model_ids(api_key: str) -> list:
-    """Models this API key can really use; the built-in defaults while there is no key or listing fails."""
+    """The five offered models; with a key, only those this account can really use (all five if the
+    account list cannot be read or has none of them)."""
     if api_key:
         try:
-            ids = _list_account_models(hashlib.sha256(api_key.encode()).hexdigest()[:12], api_key)
-            if ids:
-                return ids if "gpt-4o" not in ids else ["gpt-4o"] + [i for i in ids if i != "gpt-4o"]
+            ids = set(_list_account_models(hashlib.sha256(api_key.encode()).hexdigest()[:12], api_key))
+            usable = [m for m in _DEFAULT_ONLINE_MODELS if m in ids]
+            if usable:
+                return usable
         except Exception:
             pass
     return list(_DEFAULT_ONLINE_MODELS)
@@ -188,6 +194,14 @@ st.markdown("""
     /* spread over the whole sidebar height; footer pinned to the bottom */
     [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"],
     [data-testid="stSidebarUserContent"] [data-testid="stVerticalBlock"]:first-child { min-height: min(calc(100vh - 4.6rem), 860px); }
+    /* blocks inside columns (the API key row) must NOT inherit the full-height spread above */
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] { align-items: flex-end !important; gap: 0.4rem !important; flex: 0 0 auto !important; }
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] [data-testid="stVerticalBlock"] { min-height: 0 !important; justify-content: flex-start !important; gap: 0 !important; }
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] .stButton button { min-height: 30px !important; height: 30px !important; width: 34px !important; padding: 0 !important; font-size: 13px; margin-bottom: 4px; border-radius: 9px; }
+    /* the send button takes the sidebar colour (thin border like the input boxes, so it stays visible) */
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] .stButton button { background: #151a3d !important; border: 1px solid rgba(255,255,255,0.16) !important; box-shadow: none !important; color: #ffffff !important; }
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] .stButton button:hover { border-color: #a5b4fc !important; transform: none; }
+    [data-testid="stSidebar"] [data-testid="InputInstructions"] { display: none !important; }      /* hide "Press Enter to apply" */
     [data-testid="stSidebar"] .element-container:has(h3), [data-testid="stSidebar"] [data-testid="stElementContainer"]:has(h3) { margin-bottom: -0.55rem !important; }
     [data-testid="stSidebar"] [data-testid="stWidgetLabel"] { margin-bottom: 0 !important; min-height: 0 !important; }
     [data-testid="stSidebar"] .stSelectbox, [data-testid="stSidebar"] .stTextInput,
@@ -343,30 +357,57 @@ with st.sidebar:
 
     st.markdown("### Settings")
 
-    api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        help="Your OpenAI API key — never stored",
-        placeholder="sk-..."
-    )
-
-    _online_options = _online_model_ids(api_key) + ["Custom model ID..."]
-    _online_choice = st.selectbox(
-        "Online model",
-        options=_online_options,
-        index=0,
-        help="OpenAI vision model used for the VLM side (the list comes from your account once the "
-             "API key is entered). Needs the API key above.",
-    )
-    if _online_choice == "Custom model ID...":
-        vlm_model = st.text_input(
-            "Model ID",
-            value="",
-            placeholder="exact OpenAI model id",
-            help="Type the exact API model id of any OpenAI vision-capable model.",
+    key_col, btn_col = st.columns([8, 1])
+    with key_col:
+        typed_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            help="Your OpenAI API key - never stored. Press the button beside it to send the key and "
+                 "load the online models.",
+            placeholder="sk-..."
         ).strip()
+    with btn_col:
+        send_key = st.button("➤", key="send_api_key", help="Send the key and load the online models",
+                             use_container_width=True)
+
+    if send_key:
+        st.session_state.pop("api_key_ok", None)
+        if not typed_key:
+            st.warning("Enter your OpenAI API key first.")
+        else:
+            try:
+                _list_account_models(hashlib.sha256(typed_key.encode()).hexdigest()[:12], typed_key)
+                st.session_state["api_key_ok"] = typed_key
+            except openai.AuthenticationError:
+                st.error("This API key was rejected by OpenAI. Check it and try again.")
+            except Exception as _e:                      # network / rate limit: the key itself may be fine
+                st.session_state["api_key_ok"] = typed_key
+                st.caption(f"Could not load your model list ({type(_e).__name__}); showing the default models.")
+
+    # Only a key that was sent (and still matches the box) switches the online side on.
+    api_key = typed_key if typed_key and st.session_state.get("api_key_ok") == typed_key else ""
+
+    if api_key:
+        _online_options = _online_model_ids(api_key) + ["Custom model ID..."]
+        _online_choice = st.selectbox(
+            "Online model",
+            options=_online_options,
+            index=_online_options.index(REFERENCE_MODEL) if REFERENCE_MODEL in _online_options else 0,
+            help="OpenAI vision model used for the VLM side. The list comes from your account.",
+        )
+        if _online_choice == "Custom model ID...":
+            vlm_model = st.text_input(
+                "Model ID",
+                value="",
+                placeholder="exact OpenAI model id",
+                help="Type the exact API model id of any OpenAI vision-capable model.",
+            ).strip()
+        else:
+            vlm_model = _online_choice
     else:
-        vlm_model = _online_choice
+        vlm_model = ""
+        if typed_key:
+            st.caption("Press ➤ to send the key and choose an online model.")
 
     st.markdown("---")
     st.markdown("### Models")
@@ -834,8 +875,36 @@ def run_ocr_engine(images: list, engine: str, lang: str, easyocr_langs: list,
         return run_tesseract(images, lang, fix_rtl)
 
 
-# USD per 1M tokens (input, output). Unknown models are still usable, cost just shows n/a.
-MODEL_PRICES = {"gpt-4o": (2.50, 10.00), "gpt-4o-mini": (0.15, 0.60), "o4-mini": (1.10, 4.40)}
+# USD per 1M tokens: (input, cached input, output) - OpenAI list prices, standard tier.
+# Unknown models are still usable, the cost just shows n/a.
+MODEL_PRICES = {
+    "gpt-6-astra":  (10.00, 1.000, 50.00),
+    "gpt-6.1-sol":  (2.00, 0.100, 10.00),
+    "gpt-6-sol":    (2.00, 0.200, 10.00),
+    "gpt-6-luna":   (0.10, 0.010, 0.50),
+    "gpt-4o":       (2.50, 1.250, 10.00),
+    "gpt-4o-mini":  (0.15, 0.075, 0.60),
+    "o4-mini":      (1.10, 0.275, 4.40),
+}
+
+
+def price_for(model: str):
+    """Price tuple for a model id; dated snapshots (gpt-4o-2024-08-06) use their base model's price."""
+    m = normalize_model_id(model)
+    if m in MODEL_PRICES:
+        return MODEL_PRICES[m]
+    base = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", m)
+    return MODEL_PRICES.get(base)
+
+
+def compute_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: int):
+    """(usd, known). Cached input tokens are billed at the cheaper cached rate; reasoning tokens are
+    already part of ``output_tokens`` (OpenAI bills them as output)."""
+    price = price_for(model)
+    if not price:
+        return 0.0, False
+    fresh = max(input_tokens - cached_tokens, 0)
+    return (fresh * price[0] + cached_tokens * price[1] + output_tokens * price[2]) / 1_000_000, True
 
 
 def _chat_json(client, model: str, messages: list):
@@ -873,6 +942,7 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
     all_results = []
     total_input_tokens = 0
     total_output_tokens = 0
+    total_cached_tokens = 0
 
     for i, img in enumerate(images):
         b64 = image_to_base64(img)
@@ -888,6 +958,7 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
             content = resp.choices[0].message.content or ""
             total_input_tokens += resp.usage.prompt_tokens
             total_output_tokens += resp.usage.completion_tokens
+            total_cached_tokens += getattr(getattr(resp.usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
             try:
                 parsed = json.loads(content)
             except json.JSONDecodeError:
@@ -902,8 +973,7 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
             all_results.append({"_page": i + 1, "error": err})
 
     elapsed = time.time() - start
-    price = MODEL_PRICES.get(model)
-    cost = ((total_input_tokens / 1_000_000 * price[0]) + (total_output_tokens / 1_000_000 * price[1])) if price else 0.0
+    cost, cost_known = compute_cost(model, total_input_tokens, total_cached_tokens, total_output_tokens)
 
     combined_text = ""
     for r in all_results:
@@ -915,15 +985,19 @@ def run_vlm(images: list, api_key: str, model: str, prompt: str) -> dict:
         "pages": len(images),
         "input_tokens": total_input_tokens,
         "output_tokens": total_output_tokens,
-        "cost_usd": round(cost, 4),
-        "cost_known": price is not None,
+        "cached_tokens": total_cached_tokens,
+        "cost_usd": round(cost, 6),
+        "cost_known": cost_known,
         "time_sec": round(elapsed, 2),
         "model": model,
     }
 
 
 def fmt_cost(res: dict) -> str:
-    return f"${res['cost_usd']:.4f}" if res.get("cost_known", True) else "n/a"
+    if not res.get("cost_known", True):
+        return "n/a"
+    c = res["cost_usd"]
+    return f"${c:.4f}" if c >= 0.001 or c == 0 else f"${c:.6f}"
 
 
 def count_words(text: str) -> int:
@@ -989,7 +1063,6 @@ def _entry_row(entry: dict, doc: str):
     return summary.vlm_summary(doc, pages[0])[0] if pages else None
 
 
-REFERENCE_MODEL = "gpt-4o"   # the ONLY model treated as the correct answer in the comparison
 
 
 def _is_reference_label(label: str) -> bool:
@@ -1009,7 +1082,7 @@ def _entry_text(entry: dict) -> str:
 
 
 def show_compare(hist: dict, current_fhash=None) -> None:
-    """Field-by-field comparison of the saved runs of one document against the reference model (gpt-4o)."""
+    """Field-by-field comparison of the saved runs of one document against the reference model (REFERENCE_MODEL)."""
     from importlib import import_module
     _summary_mod()
     ref_mod = import_module("app.templates.compare_ref")
@@ -1035,12 +1108,12 @@ def show_compare(hist: dict, current_fhash=None) -> None:
             cands[f"{e['label']}  ({e['at']})"] = e
     ref_names = [n for n, e in cands.items() if _is_reference_label(e["label"])]
     if not ref_names:
-        st.warning("No reference yet. Run the online model **gpt-4o** on this document with document type "
+        st.warning(f"No reference yet. Run the online model **{REFERENCE_MODEL}** on this document with document type "
                    f"**{doc}** (sidebar), then come back - every other model is scored against it.")
         if cands:
             st.caption("Online runs available as a reference: " + ", ".join(cands))
         return
-    ref_name = st.selectbox("Reference: gpt-4o (treated as the correct answer)", list(cands),
+    ref_name = st.selectbox(f"Reference: {REFERENCE_MODEL} (treated as the correct answer)", list(cands),
                             index=list(cands).index(ref_names[-1]), key="cmp_ref")
     ref_entry = cands[ref_name]
     ref_page = next(p for p in ref_entry["result"]["results"] if "error" not in p)
