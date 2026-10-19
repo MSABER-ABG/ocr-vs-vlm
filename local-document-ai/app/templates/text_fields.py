@@ -33,6 +33,14 @@ _SERIAL_RE = re.compile(r"[A-Za-z]{1,3}\s?\d{6,9}")
 _HEADER_WORDS = ("جمهوري", "مصر", "العربي", "بطاق", "تحقيق", "الشخصي", "وزار", "الداخلي")
 _HEADER_FULL = ("جمهورية مصر العربية", "بطاقة تحقيق الشخصية")
 _ARABIC_RE = re.compile(r"[؀-ۿ]")
+_LETTER_RE = re.compile("[ء-يٱ-ۓ]")                          # Arabic LETTERS (not digits)
+_SUBTITLE_RE = re.compile(r"بطاق\S*\s+\S*يق\s+ال\S*")                            # "بطاقة تحقيق الشخصية", tolerant
+_TITLE_RE = re.compile(r"جمهور\S*\s+مصر\s+العربي\S*")                            # "جمهورية مصر العربية", tolerant
+
+
+def _fix_digit_dots(text: str) -> str:
+    """The card's printed zero is a dot: a dot touching a digit is a zero."""
+    return re.sub(r"(?<=[٠-٩0-9])\.|\.(?=[٠-٩0-9])", "٠", text)
 
 
 def _norm_letters(t: str) -> str:
@@ -67,11 +75,14 @@ def id_fields_from_text(text: str) -> dict:
         number = best if len(best) >= 10 else ""      # too short = not the number; never show the serial
     nid = validate_national_id(number) if number else {"value": "", "valid": False, "errors": ["not found"]}
 
+    # Everything up to the printed subtitle is header (the decorative title is often garbled); a line is kept
+    # only if it has Arabic LETTERS, so the printed date / number read as digits or look-alikes are dropped.
+    start = next((i for i, l in enumerate(lines) if _SUBTITLE_RE.search(_norm_letters(l))), -1) + 1
     text_lines = []
-    for ln, a in zip(lines, ascii_lines):
-        if not _ARABIC_RE.search(ln) or len(re.findall(r"\d", a)) >= 3 or _is_header(ln):
-            continue
-        text_lines.append(_norm_letters(ln))
+    for ln in lines[start:]:
+        ln = _SERIAL_RE.sub("", _TITLE_RE.sub("", _SUBTITLE_RE.sub("", _norm_letters(ln)))).strip()
+        if _LETTER_RE.search(ln) and not _is_header(ln):
+            text_lines.append(_fix_digit_dots(ln))
     # card layout: first name, rest of the name, then the address lines
     name = " ".join(text_lines[:2])
     address = text_lines[2:4]

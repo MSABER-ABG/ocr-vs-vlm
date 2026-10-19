@@ -784,23 +784,49 @@ def run_local_id_card(images: list, lang_codes: list, engine: str = "paddle_v4")
     }
 
 
-def run_paddleocr_vl(images: list) -> dict:
-    """PaddleOCR-VL (experimental, slow): one-shot subprocess in the isolated Paddle-3 environment."""
+def run_paddleocr_vl(images: list, id_mode: bool = False) -> dict:
+    """PaddleOCR-VL (experimental, slow): one-shot subprocess in the isolated Paddle-3 environment.
+
+    Egyptian ID card (``id_mode``): each image is first straightened to the card (same step as ABG OCR), the
+    14-digit number is read by a small glyph classifier (PaddleOCR-VL misreads this digit font), and the VL
+    text supplies the name / address / serial. Other document types: the plain VL text, as before."""
     start = time.time()
     import sys
     if LOCAL_DOC_AI_DIR not in sys.path:
         sys.path.insert(0, LOCAL_DOC_AI_DIR)
     from app.ocr.paddle_vl import parse_images, blocks_to_text
-    result = parse_images(images)
-    full_text = blocks_to_text(result["pages"])
+    if not id_mode:
+        result = parse_images(images)
+        full_text = blocks_to_text(result["pages"])
+        return {
+            "text": full_text,
+            "pages": len(images),
+            "word_count": len(full_text.split()),
+            "char_count": len(full_text),
+            "time_sec": round(time.time() - start, 2),
+            "cost_usd": 0.0,
+            "engine": result.get("model", "PaddleOCR-VL"),
+        }
+
+    from app.templates.card import extract_card
+    from app.templates.id_card_vl import build_id_fields
+    from app.templates.id_number_reader import read_number_fast
+    cards = [extract_card(img) for img in images]
+    numbers = [read_number_fast(c) for c in cards]
+    result = parse_images(cards)
+    page_texts = [blocks_to_text([p]) for p in result["pages"]]
+    fields = [build_id_fields(t, n) for t, n in zip(page_texts, numbers)]
+    full_text = (chr(10) * 2 + "--- Page Break ---" + chr(10) * 2).join(page_texts)
     return {
         "text": full_text,
+        "structured": fields if len(fields) > 1 else fields[0],
+        "template_fields": True,
         "pages": len(images),
         "word_count": len(full_text.split()),
         "char_count": len(full_text),
         "time_sec": round(time.time() - start, 2),
         "cost_usd": 0.0,
-        "engine": result.get("model", "PaddleOCR-VL"),
+        "engine": result.get("model", "PaddleOCR-VL") + " · straightened card + number reader",
     }
 
 
@@ -860,7 +886,7 @@ def run_ocr_engine(images: list, engine: str, lang: str, easyocr_langs: list,
                     local_engine: str = "paddle_v4", cheque_mode: bool = False) -> dict:
     """Dispatch to the selected OCR engine."""
     if engine == "PaddleOCR-VL":
-        return run_paddleocr_vl(images)
+        return run_paddleocr_vl(images, id_mode)
     if engine == "ABG OCR":
         if cheque_mode:
             return run_local_cheque(images, local_langs, local_engine)
@@ -1338,7 +1364,7 @@ else:
     import hashlib
     hist = st.session_state.setdefault("history", {})
     fhash = hashlib.md5(file_bytes).hexdigest()
-    _abg = ocr_engine == "ABG OCR"
+    _abg = ocr_engine in ("ABG OCR", "PaddleOCR-VL")      # results depend on the document type
     ocr_key = ("ocr", fhash, ocr_engine, doc_type if _abg else "-", str(ocr_lang), str(easyocr_langs),
                str(paddle_langs), fix_rtl, str(local_langs), local_engine, enhance_image)
     vlm_key = ("vlm", fhash, vlm_model, doc_type)
